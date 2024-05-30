@@ -601,6 +601,95 @@ mluOpStatus_t setFFT1dReserveArea_v2(mluOpHandle_t handle,
   return status;
 }
 
+mluOpStatus_t setFFT2dReserveArea(mluOpHandle_t handle, mluOpFFTPlan_t fft_plan,
+                                  const std::string api) {
+  mluOpStatus_t status = MLUOP_STATUS_SUCCESS;
+
+  VLOG(5) << "Into configure FFT1d ReserveArea Addrs (zrg)";
+  const std::string make_plan_api = "[setFFT2dReserveArea]";
+  // size_t workspace_size = 0;
+  // size_t reservespace_size = 0;
+
+  size_t CPX_TYPE_SIZE = 0;
+
+  switch (fft_plan->fft_type) {
+    case CNFFT_COMPLEX_HALF2COMPLEX_HALF: {
+      CPX_TYPE_SIZE = 2 * 2;
+    } break;
+    case CNFFT_COMPLEX_FLOAT2COMPLEX_FLOAT: {
+      CPX_TYPE_SIZE = 4 * 2;
+    }; break;
+    default: {
+      LOG(ERROR) << make_plan_api << ": invalid c2c 1d fft type.";
+      // return;
+      status = MLUOP_STATUS_NOT_SUPPORTED;
+      return status;
+      // return MLUOP_STATUS_BAD_PARAM;
+    }
+  }
+
+  // int batch = fft_plan->batch;
+  int _n0 = fft_plan->n[0];
+  int _n1 = fft_plan->n[1];
+  // printf("check over.\n\n");
+  // printf("_n0: %d, _n1: %d.\n\n", _n0, _n1);
+  size_t factors_size = FFT_MAXFACTORS * sizeof(int);  // bytes
+  // size_t buffer_size = batch * sizeof(CPX_TYPE_SIZE) * nfft;
+  size_t twiddles_size = sizeof(CPX_TYPE_SIZE) * _n1 * 2;
+  size_t twiddles_size_2d = sizeof(CPX_TYPE_SIZE) * _n0 * 2;
+  // size_t dft_table_size = sizeof(CPX_TYPE_SIZE) * nfft * 2;
+  size_t reservespace_offset = 0;
+  fft_plan->mlu_addrs.twiddles =
+      (uint8_t *)fft_plan->reservespace_addr + reservespace_offset;
+  reservespace_offset += twiddles_size;
+  fft_plan->mlu_addrs.twiddles_end =
+      (uint8_t *)fft_plan->mlu_addrs.twiddles +
+      ((uint8_t *)fft_plan->twiddles_end - (uint8_t *)fft_plan->twiddles);
+
+  fft_plan->mlu_addrs.dft_matrix =
+      (int *)((uint8_t *)fft_plan->reservespace_addr + reservespace_offset);
+  reservespace_offset += DFT_TABLE_SIZE;
+
+  fft_plan->mlu_addrs.factors =
+      (int *)((uint8_t *)fft_plan->reservespace_addr + reservespace_offset);
+  reservespace_offset += factors_size;
+
+  fft_plan->mlu_addrs.twiddles_2d =
+      (uint8_t *)fft_plan->reservespace_addr + reservespace_offset;
+  reservespace_offset += twiddles_size_2d;
+  fft_plan->mlu_addrs.twiddles_2d_end =
+      (uint8_t *)fft_plan->mlu_addrs.twiddles_2d +
+      ((uint8_t *)fft_plan->twiddles_2d_end - (uint8_t *)fft_plan->twiddles_2d);
+
+  fft_plan->mlu_addrs.dft_matrix_2d =
+      (int *)((uint8_t *)fft_plan->reservespace_addr + reservespace_offset);
+  reservespace_offset += DFT_TABLE_SIZE;
+
+  fft_plan->mlu_addrs.factors_2d =
+      (int *)((uint8_t *)fft_plan->reservespace_addr + reservespace_offset);
+  reservespace_offset += factors_size;
+
+  // if(!fft_plan->reservespace_addr) printf("reservespace_addr: NULL\n\n");
+  // if(!fft_plan->factors) printf("factors: NULL\n\n");
+  // if(!fft_plan->mlu_addrs.factors) printf("fft_plan->mlu_addrs.factors:
+  // NULL\n\n"); printf("check over.\n\n");
+
+  CNRT_CHECK(cnrtMemcpy(fft_plan->mlu_addrs.factors, fft_plan->factors,
+                        factors_size, cnrtMemcpyHostToDev));
+  CNRT_CHECK(cnrtMemcpy(fft_plan->mlu_addrs.twiddles, fft_plan->twiddles,
+                        twiddles_size, cnrtMemcpyHostToDev));
+  CNRT_CHECK(cnrtMemcpy(fft_plan->mlu_addrs.dft_matrix, fft_plan->dft_matrix,
+                        DFT_TABLE_SIZE, cnrtMemcpyHostToDev));
+  CNRT_CHECK(cnrtMemcpy(fft_plan->mlu_addrs.factors_2d, fft_plan->factors_2d,
+                        factors_size, cnrtMemcpyHostToDev));
+  CNRT_CHECK(cnrtMemcpy(fft_plan->mlu_addrs.twiddles_2d, fft_plan->twiddles_2d,
+                        twiddles_size_2d, cnrtMemcpyHostToDev));
+  CNRT_CHECK(cnrtMemcpy(fft_plan->mlu_addrs.dft_matrix_2d,
+                        fft_plan->dft_matrix_2d, DFT_TABLE_SIZE,
+                        cnrtMemcpyHostToDev));
+  return status;
+}
+
 static void configureFFT1dMatmulWorkspaceAddrs(mluOpHandle_t handle,
                                                mluOpFFTPlan_t fft_plan,
                                                void *input, void *workspace,
@@ -762,6 +851,56 @@ static void configureFFT1dWorkspaceAddrs_v2(mluOpHandle_t handle,
 
   size_t buffer_size = batch * sizeof(CPX_TYPE_SIZE) * nfft;
   size_t twiddles_size = sizeof(CPX_TYPE_SIZE) * nfft * 2;
+
+  // mlu_addrs
+  // fft_plan->mlu_addrs.input = workspace;
+  // fft_plan->mlu_addrs.output = fft_plan->mlu_addrs.input + buffer_size;
+  // fft_plan->mlu_addrs.buffer = fft_plan->mlu_addrs.output + buffer_size;
+
+  fft_plan->mlu_addrs.input = input;
+  fft_plan->mlu_addrs.output = output;
+  // fft_plan->mlu_addrs.buffer_in = (uint8_t *)workspace;
+  // fft_plan->mlu_addrs.buffer_out = (uint8_t *)workspace + buffer_size;
+  // fft_plan->mlu_addrs.buffer_buf = (uint8_t *)workspace + 2 * buffer_size;
+
+  fft_plan->mlu_addrs.buffer_buf = (uint8_t *)workspace;
+
+  // fft_plan->mlu_addrs.twiddles = mlu_runtime_.allocate(reservespace_size);
+}
+
+// zrg
+
+static void configureFFT2dWorkspaceAddrs(mluOpHandle_t handle,
+                                         mluOpFFTPlan_t fft_plan, void *input,
+                                         void *workspace, void *output) {
+  VLOG(5) << "Into configure FFT1d Workspace Addrs (zrg)";
+  const std::string make_plan_api = "[configureFFT1dWorkspaceAddrs_v2]";
+  size_t workspace_size = 0;
+  size_t reservespace_size = 0;
+
+  size_t CPX_TYPE_SIZE = 0;
+
+  switch (fft_plan->fft_type) {
+    case CNFFT_COMPLEX_HALF2COMPLEX_HALF: {
+      CPX_TYPE_SIZE = 2 * 2;
+    } break;
+    case CNFFT_COMPLEX_FLOAT2COMPLEX_FLOAT: {
+      CPX_TYPE_SIZE = 4 * 2;
+    }; break;
+    default: {
+      LOG(ERROR) << make_plan_api << ": invalid c2c 1d fft type.";
+      return;
+      // return MLUOP_STATUS_BAD_PARAM;
+    }
+  }
+
+  int batch = fft_plan->batch;
+  int _n0 = fft_plan->n[0];
+  int _n1 = fft_plan->n[1];
+
+  size_t buffer_size = batch * sizeof(CPX_TYPE_SIZE) * _n0 * _n1;
+  size_t twiddles_size = sizeof(CPX_TYPE_SIZE) * _n1 * 2;
+  size_t twiddles_size_2d = sizeof(CPX_TYPE_SIZE) * _n0 * 2;
 
   // mlu_addrs
   // fft_plan->mlu_addrs.input = workspace;
@@ -1313,7 +1452,7 @@ static mluOpStatus_t computeFFT1dMatmulResult(mluOpHandle_t handle,
 
 static mluOpStatus_t policyFunc(mluOpHandle_t handle, cnrtDim3_t *k_dim,
                                 cnrtFunctionType_t *k_type) {
-  *k_type = CNRT_FUNC_TYPE_UNION1;
+  *k_type = CNRT_FUNC_TYPE_UNION8;
   k_dim->x = handle->core_num_per_cluster *
              mluop::runtime::getClusterLimitCapability(handle);
   // k_dim->x = 4;
@@ -1590,6 +1729,69 @@ mluOpStatus_t execFFTc2c1d(mluOpHandle_t handle, mluOpFFTPlan_t fft_plan,
   return status;
 }
 
+mluOpStatus_t execFFTc2c2d(mluOpHandle_t handle, mluOpFFTPlan_t fft_plan,
+                           const float scale_factor, int direction) {
+  std::string api = "[execFFTc2c1d]";
+
+  VLOG(5) << "launch c2c fft1d";
+  // TODO(niyuming) luanch merge kernel
+  // int core_num = handle->core_num_per_cluster;
+  mluOpStatus_t status = MLUOP_STATUS_SUCCESS;
+  cnrtDim3_t k_dim;
+  cnrtFunctionType_t k_type;
+  policyFunc(handle, &k_dim, &k_type);
+
+#if 0
+  kernelFFTButterfly(k_dim, k_type, handle->queue, fft_plan, direction,
+                     FFT_IFFT);
+
+  // VLOG(5) << "launch mluOpTranspose for input CNFFT_FUNC_MATMUL";
+  // int padded_input_num = batch * n;
+  // const int trans_dim_num = 3;
+  // int trans_input_dims[trans_dim_num] = {fft_plan->n[0], fft_plan->n[1],
+  // COMPLEX}; int trans_output_dims[trans_dim_num] = {fft_plan->n[1],
+  // fft_plan->n[0], COMPLEX}; int trans_permute[trans_dim_num] = {1, 0, 2};
+
+  const int trans_dim_num = 2;
+  int trans_input_dims[trans_dim_num] = {fft_plan->n[0], fft_plan->n[1]};
+  int trans_output_dims[trans_dim_num] = {fft_plan->n[1], fft_plan->n[0]};
+  int trans_permute[trans_dim_num] = {1, 0};
+
+  // status = fftGetTransposeWorkspaceSize(handle, trans_workspace_size,
+  //                                       trans_dim_num, trans_input_dims,
+  //                                       trans_permute, in_r_dtype, api);
+  // fft_plan->matmul_addrs.internal_workspace_size = std::max(
+  //     fft_plan->matmul_addrs.internal_workspace_size, trans_workspace_size);
+
+  status = fftTranspose(handle, trans_dim_num, trans_input_dims,
+                        trans_output_dims, trans_permute,
+                        fft_plan->mlu_addrs.output, fft_plan->mlu_addrs.input,
+                        fft_plan->input_dtype, fft_plan->mlu_addrs.buffer_buf,
+                        fft_plan->workspace_size, api);
+  INTERNAL_CHECK(api, status == MLUOP_STATUS_SUCCESS);
+
+  // CALL_CNNL(cnnlTranspose_v2(cnnl_handle, trans_desc, cnnl_input_desc,
+  // ori_ptr,
+  //                            cnnl_transed_input_desc, transed_ptr, workspace,
+  //                            workspace_size));
+
+  kernelFFTButterfly2d(k_dim, k_type, handle->queue, fft_plan, direction,
+                       FFT_IFFT);
+  status = fftTranspose(handle, trans_dim_num, trans_output_dims,
+                        trans_input_dims, trans_permute,
+                        fft_plan->mlu_addrs.input, fft_plan->mlu_addrs.output,
+                        fft_plan->input_dtype, fft_plan->mlu_addrs.buffer_buf,
+                        fft_plan->workspace_size, api);
+
+#endif
+  kernelFFTButterfly(k_dim, k_type, handle->queue, fft_plan, direction,
+                     FFT_IFFT);
+  kernelFFTButterflyColumn(k_dim, k_type, handle->queue, fft_plan, direction,
+                           FFT_IFFT);
+
+  return status;
+}
+
 mluOpStatus_t execFFT1d(mluOpHandle_t handle, const mluOpFFTPlan_t fft_plan,
                         const void *input, const float scale_factor,
                         void *workspace, void *output, int direction) {
@@ -1631,6 +1833,23 @@ mluOpStatus_t execFFT1d(mluOpHandle_t handle, const mluOpFFTPlan_t fft_plan,
   configureFFT1dWorkspaceAddrs_v2(handle, fft_plan, (void *)input, workspace,
                                   output);
   status = execFFTc2c1d(handle, fft_plan, scale_factor, direction);
+
+  INTERNAL_CHECK(api, status == MLUOP_STATUS_SUCCESS);
+
+  return status;
+}
+
+mluOpStatus_t execFFT2d(mluOpHandle_t handle, const mluOpFFTPlan_t fft_plan,
+                        const void *input, const float scale_factor,
+                        void *workspace, void *output, int direction) {
+  mluOpStatus_t status = MLUOP_STATUS_SUCCESS;
+  std::string api = "[mluOpExecFFT]";
+
+  // direction: 0(forward) 1(backward)
+
+  configureFFT2dWorkspaceAddrs(handle, fft_plan, (void *)input, workspace,
+                               output);
+  status = execFFTc2c2d(handle, fft_plan, scale_factor, direction);
 
   INTERNAL_CHECK(api, status == MLUOP_STATUS_SUCCESS);
 

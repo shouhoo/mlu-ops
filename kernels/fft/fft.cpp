@@ -75,6 +75,7 @@ mluOpStatus_t MLUOP_WIN_API mluOpCreateFFTPlan(mluOpFFTPlan_t *fft_plan) {
     return MLUOP_STATUS_ALLOC_FAILED;
   }
   ts->factors = new int[FFT_MAXFACTORS];
+  ts->factors_2d = new int[FFT_MAXFACTORS];
   *fft_plan = ts;
   return MLUOP_STATUS_SUCCESS;
 }
@@ -101,6 +102,28 @@ mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddlesLine(
   return MLUOP_STATUS_SUCCESS;
 }
 
+template <typename DT>
+mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddlesLineColumn(
+    void *_twiddles, const int butterfly_num, const int section_num,
+    const int radix, const int nfft, const int dir) {
+  int j, k;
+  DT phase;
+  DT *twiddles = (DT *)_twiddles;
+  const int sign = (dir == FFT_FORWARD) ? -1 : 1;
+  for (j = 1; j < radix; j++) {
+    // phase = 1 when k = 0
+    for (k = 0; k < butterfly_num; k++) {
+      phase = sign * 2 * (DT)FFT_PI * section_num * k * j / nfft;
+      twiddles[((radix - 1) * k + (j - 1))] = (DT)cos(phase);  // r
+      twiddles[((radix - 1) * k + (j - 1)) + butterfly_num * (radix - 1)] =
+          (DT)sin(phase);  // i
+      // twiddles[(butterfly_num * (k - 1) + j) * 2] = (DT)cos(phase);     // r
+      // twiddles[(butterfly_num * (k - 1) + j) * 2 + 1] = (DT)sin(phase); // i
+    }  // radix
+  }    // butterfly_num
+  return MLUOP_STATUS_SUCCESS;
+}
+
 /**
  * @details
  * @brief   The control interfaces of the generation of FFT's twiddles.
@@ -115,8 +138,9 @@ mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddlesLine(
  */
 
 template <typename DT>
-mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddles(void *&_twiddles, int *factors,
-                                                const int _nfft,
+mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddles(void *&_twiddles,
+                                                void *&_twiddles_end,
+                                                int *factors, const int _nfft,
                                                 const int dir) {
   // twiddles = _twiddles;
   DT *twiddles = new DT[_nfft * 2 * 2];  // complex *2(large+small)
@@ -166,6 +190,65 @@ mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddles(void *&_twiddles, int *factors,
     }                                             // small_stage_count
   }                                               // stage_count
 
+  _twiddles_end = (void *)((DT *)_twiddles + tw_offset * 2);
+  return MLUOP_STATUS_SUCCESS;
+}
+
+template <typename DT>
+mluOpStatus_t MLUOP_WIN_API fftGenerateTwiddlesColumn(void *&_twiddles,
+                                                      void *&_twiddles_end,
+                                                      int *factors,
+                                                      const int _nfft,
+                                                      const int dir) {
+  // twiddles = _twiddles;
+  DT *twiddles = new DT[_nfft * 2 * 2];  // complex *2(large+small)
+  _twiddles = twiddles;
+  int stage_count = factors[0];
+  int cur_large_radix, cur_small_radix, section_num, butterfly_num,
+      loop_stage;  // current radix
+  int tw_offset = 0;
+  int small_stage_count, small_loop_stage, small_factors_offset;
+
+  // for other stage, ignore first stage
+  for (loop_stage = 2; loop_stage <= stage_count; loop_stage++) {
+    cur_large_radix = factors[5 * loop_stage];
+    section_num = factors[5 * loop_stage + 1];
+    butterfly_num = factors[5 * loop_stage + 2];
+    fftGenerateTwiddlesLineColumn<DT>(twiddles, butterfly_num, section_num,
+                                      cur_large_radix, _nfft, dir);
+    twiddles += butterfly_num * (cur_large_radix - 1) * 2;
+    tw_offset += butterfly_num * (cur_large_radix - 1);
+  }  // stage_count
+
+  // do not ignore first stage
+  for (loop_stage = 1; loop_stage <= stage_count; loop_stage++) {
+    cur_large_radix = factors[5 * loop_stage];
+    small_factors_offset = factors[5 * loop_stage + 4];
+    small_stage_count = factors[small_factors_offset];
+    factors[small_factors_offset + 2] = tw_offset;
+    // cur_radix = factors[4 * loop_stage];
+    // section_num = factors[4 * loop_stage + 1];
+    // butterfly_num = factors[4 * loop_stage + 2];
+    // butterfly_num = factors[4 * loop_stage + 2];
+    // generator(twiddles, butterfly_num, section_num, cur_radix, _nfft, dir);
+    // twiddles += butterfly_num * (cur_radix - 1);
+
+    for (small_loop_stage = 2; small_loop_stage <= small_stage_count;
+         small_loop_stage++) {
+      cur_small_radix = factors[small_factors_offset + 4 * small_loop_stage];
+      section_num = factors[small_factors_offset + 4 * small_loop_stage + 1];
+      butterfly_num = factors[small_factors_offset + 4 * small_loop_stage + 2];
+      // butterfly_num = factors[small_factors_offset + 4 * small_loop_stage +
+      // 2];
+      fftGenerateTwiddlesLine<DT>(twiddles, butterfly_num, section_num,
+                                  cur_small_radix, cur_large_radix, dir);
+      twiddles += butterfly_num * (cur_small_radix - 1) * 2;
+      tw_offset +=
+          butterfly_num * (cur_small_radix - 1);  // complex element offset
+    }                                             // small_stage_count
+  }                                               // stage_count
+
+  _twiddles_end = (void *)((DT *)_twiddles + tw_offset * 2);
   return MLUOP_STATUS_SUCCESS;
 }
 
@@ -199,10 +282,9 @@ mluOpStatus_t MLUOP_WIN_API fftGenerateDftMatrix(void *&_dft_matrix,
   dft_table_entry *dft_matrix_table = (dft_table_entry *)dft_matrix;
   _dft_matrix = dft_matrix;
 
-  dft_table_entry *dft_matrix_table_end = dft_matrix_table + MAX_DFT_MATRIX_NR;
+  dft_table_entry *dft_matrix_table_end =
+      dft_matrix_table + MAX_DFT_MATRIX_NR + 1;
   dft_matrix = (DT *)dft_matrix_table_end;
-
-  int cur_table_entry = 0;
 
   // radix == -1 means the end of table
   // init table
@@ -218,15 +300,19 @@ mluOpStatus_t MLUOP_WIN_API fftGenerateDftMatrix(void *&_dft_matrix,
 
   // initialize offset as the end of table
   // transform  dft_table_entry to complex DT
-  int cur_offset =
-      (MAX_DFT_MATRIX_NR + 1) * sizeof(dft_table_entry) / (sizeof(DT) * 2);
+  // int cur_offset =
+  //     (MAX_DFT_MATRIX_NR + 1) * sizeof(dft_table_entry) / (sizeof(DT) * 2);
 
+  int cur_offset = ((DT *)dft_matrix - (DT *)_dft_matrix) / 2;
+
+  // dft_matrix += cur_offset * 2;
+  int cur_table_entry = 0;
   for (loop_stage = 1; loop_stage <= stage_count; loop_stage++) {
     cur_large_radix = factors[5 * loop_stage];
     small_factors_offset = factors[5 * loop_stage + 4];
     small_stage_count = factors[small_factors_offset];
 
-    for (small_loop_stage = 2; small_loop_stage <= small_stage_count;
+    for (small_loop_stage = 1; small_loop_stage <= small_stage_count;
          small_loop_stage++) {
       cur_small_radix = factors[small_factors_offset + 4 * small_loop_stage];
       section_num = factors[small_factors_offset + 4 * small_loop_stage + 1];
@@ -234,11 +320,13 @@ mluOpStatus_t MLUOP_WIN_API fftGenerateDftMatrix(void *&_dft_matrix,
 
       for (int entry = 0;; entry++) {
         if (dft_matrix_table[entry].radix == -1) {
-          DT *dft_matrix_real = dft_matrix;
+          // DT *dft_matrix_real = dft_matrix;
 
           fftGenerateDftMatrixKernel<DT>(dft_matrix, cur_small_radix, dir);
-          cur_table_entry++;
+          dft_matrix += cur_small_radix * cur_small_radix * 2;
+
           dft_matrix_table[cur_table_entry] = {cur_small_radix, cur_offset};
+          cur_table_entry++;
           cur_offset += cur_small_radix * cur_small_radix;
           if (cur_table_entry == MAX_DFT_MATRIX_NR) {
             LOG(ERROR) << "[fftGenerateDftMatrix]: too much dft matrices";
@@ -384,40 +472,134 @@ mluOpStatus_t MLUOP_WIN_API fftFactor(const int _n, int *facbuf,
 
   int large_radix = 1;
   facbuf += small_factors_offset;
+  // 256 = 16 * 16
+  // 512 = 32 * 16
+  // 1024 = 32 * 32
+  // 2048 = 64 * 32
+  // while (n > 1) {
+  //   if ((n % 64) == 0 && 0) {
+  //     r = 64;
+  //     // set small factors
+  //   } else if ((n % 32) == 0 && 0) {
+  //     r = 32;
+  //   } else if ((n % 16) == 0 ) {
+  //     r = 16;
+  //   } else if ((n % 8) == 0 && 0) {
+  //     r = 8;
+  //     // set small factors
+  //   } else if ((n % 27) == 0) {
+  //     r = 27;
+  //   } else if ((n % 9) == 0) {
+  //     r = 9;
+  //   } else if ((n % 3) == 0) {
+  //     r = 3;
+  //   } else {
+  //     // prime
+  //     r = n;
+  //   }
 
   while (n > 1) {
-    if ((n % 1024) == 0) {
-      r = 1024;
-      // set small factors
-    } else if ((n % 512) == 0) {
-      r = 512;
-      // set small factors
-    } else if ((n % 9) == 0) {
-      r = 9;
-    } else if ((n % 3) == 0) {
-      r = 3;
-    } else {
-      // prime
-      r = n;
+    // if (n % 16 ==0) {
+    //   r = 16;
+    // } else if ((n % 8) == 0) {
+    //   r = 8;
+    // } else if ((n % 25) == 0) {
+    //   r = 25;
+    // } else if ((n % 28) == 0) {
+    //   r = 28;
+    // } else {
+    //   // prime
+    //   r = n;
+    // }
 
-      // large_radix = 1;
-      // while (n > 1 || large_radix < MaxLargeRadix)
-      // {
-      //   if ((n % 1024) == 0)
-      //   {
-      //     r = 1024;
-      //     // set small factors
-      //   }
-      //   else if ((n % 512) == 0)
-      //   {
-      //     r = 512;
-      //     // set small factors
-      //   }
-      //   else
-      //   {
-      //     r =n;
-      //   }
-      // }
+    switch (_n) {
+      case 64:
+        if (n % 8 == 0) {
+          r = 8;
+        } else if ((n % 8) == 0) {
+          r = 8;
+        }
+        break;
+
+      case 128:
+        if (n % 16 == 0) {
+          r = 16;
+        } else if ((n % 8) == 0) {
+          r = 8;
+        }
+        break;
+
+      case 200:
+        if (n % 20 == 0) {
+          r = 20;
+        } else if ((n % 10) == 0) {
+          r = 10;
+        }
+        break;
+
+      case 275:
+        if (n % 25 == 0) {
+          r = 25;
+        } else if ((n % 11) == 0) {
+          r = 11;
+        }
+        break;
+
+      case 350:
+        if (n % 25 == 0) {
+          r = 25;
+        } else if ((n % 14) == 0) {
+          r = 14;
+        }
+        break;
+
+      case 400:
+        if (n % 25 == 0) {
+          r = 25;
+        } else if ((n % 16) == 0) {
+          r = 16;
+        }
+        break;
+
+      case 500:
+        if (n % 25 == 0) {
+          r = 25;
+        } else if ((n % 20) == 0) {
+          r = 20;
+        }
+        break;
+
+      case 650:
+        if (n % 25 == 0) {
+          r = 25;
+        } else if ((n % 26) == 0) {
+          r = 26;
+        }
+        break;
+
+      case 2048:
+        if (n % 16 == 0) {
+          r = 16;
+        } else if ((n % 8) == 0) {
+          r = 8;
+        }
+        break;
+
+      case 6000:
+        if (n % 30 == 0) {
+          r = 30;
+        } else if ((n % 20) == 0) {
+          r = 20;
+        } else if ((n % 10) == 0) {
+          r = 10;
+        }
+        break;
+
+      default:
+        if (_n <= 40) {
+          r = _n;
+        }
+        break;
     }
 
     n /= r;
@@ -463,60 +645,165 @@ mluOpStatus_t MLUOP_WIN_API fftTwoStepFactor(const int _n, int *facbuf) {
   int large_radix = 1;
   int small_factors_offset = 22 * 5;
 
+  // while (n > 1) {
+  //   if ((n % 2048) == 0 && 0) {
+  //     r = 2048;
+  //     // set small factors
+  //   } else if ((n % 1024) == 0 && 0) {
+  //     r = 1024;
+  //   }  else if ((n % 512) == 0 && 0) {
+  //     r = 512;
+  //   }else if ((n % 256) == 0) {
+  //     r = 256;
+  //   } else if ((n % 128) == 0) {
+  //     r = 128;
+  //   } else if ((n % 64) == 0) {
+  //     r = 64;
+  //   } else if ((n % 16) == 0) {
+  //     r = 16;
+  //   } else if ((n % 6561) == 0 && 0) {
+  //     r = 6561;
+  //   } else if ((n % 2187) == 0) {
+  //     r = 2187;
+  //   } else if ((n % 729) == 0) {
+  //     r = 729;
+  //   } else if ((n % 243) == 0) {
+  //     r = 243;
+  //   } else if ((n % 81) == 0) {
+  //     r = 81;
+  //   } else if ((n % 27) == 0) {
+  //     r = 27;
+  //   } else if ((n % 9) == 0) {
+  //     r = 9;
+  //   } else if ((n % 3) == 0) {
+  //     r = 3;
+  //   } else {
+  //     // prime
+  //     r = n;
+  //   }
+
   while (n > 1) {
-    if ((n % 1024) == 0) {
-      r = 1024;
-      // set small factors
-    } else if ((n % 512) == 0) {
-      r = 512;
-      // set small factors
-    } else if ((n % 2187) == 0) {
-      r = 2187;
-    } else if ((n % 729) == 0) {
-      r = 729;
-    } else if ((n % 243) == 0) {
-      r = 243;
-    } else if ((n % 81) == 0) {
-      r = 81;
-    } else if ((n % 27) == 0) {
-      r = 27;
-    } else if ((n % 9) == 0) {
-      r = 9;
-    } else if ((n % 3) == 0) {
-      r = 3;
-      // fftFactor(r, facbuf, small_factors_offset);
-      // small_stage_count = 2;
-      // std::cout<< "r1=3, r2=3"<< std::endl;
-      // set small factors
+    switch (_n) {
+        // case 2048:
+        //   r = 2048;
+        //   break;
 
-      // factors[small_factors_offset+5*j+0]: radix
-      // factors[small_factors_offset+5*j+1]: section_num
-      // factors[small_factors_offset+5*j+2]: butterfly_num
-      // factors[small_factors_offset+5*j+3]: in_stride
-      // factors[small_factors_offset+5*j+4]: tw_offset
-    } else {
-      // prime
-      r = n;
+      case 2048:
+        if (n % 16 == 0) {
+          r = 16;
+        } else if ((n % 8) == 0) {
+          r = 8;
+        }
+        break;
 
-      // large_radix = 1;
-      // while (n > 1 || large_radix < MaxLargeRadix)
-      // {
-      //   if ((n % 1024) == 0)
-      //   {
-      //     r = 1024;
-      //     // set small factors
-      //   }
-      //   else if ((n % 512) == 0)
-      //   {
-      //     r = 512;
-      //     // set small factors
-      //   }
-      //   else
-      //   {
-      //     r =n;
-      //   }
-      // }
+      case 6000:
+        r = 6000;
+        break;
+
+      case 7000:
+        if (n % 200 == 0) {
+          r = 200;
+        } else if ((n % 35) == 0) {
+          r = 35;
+        }
+        break;
+
+      case 8000:
+        if (n % 500 == 0) {
+          r = 500;
+        } else if ((n % 16) == 0) {
+          r = 16;
+        }
+        break;
+
+      case 9000:
+        if (n % 500 == 0) {
+          r = 500;
+        } else if ((n % 18) == 0) {
+          r = 18;
+        }
+        break;
+
+      case 10000:
+        if (n % 500 == 0) {
+          r = 500;
+        } else if ((n % 20) == 0) {
+          r = 20;
+        }
+        break;
+
+      case 11000:
+        if (n % 275 == 0) {
+          r = 275;
+        } else if ((n % 40) == 0) {
+          r = 40;
+        }
+        break;
+
+      case 12000:
+        if (n % 400 == 0) {
+          r = 400;
+        } else if ((n % 30) == 0) {
+          r = 30;
+        }
+        break;
+
+      case 13000:
+        if (n % 650 == 0) {
+          r = 650;
+        } else if ((n % 20) == 0) {
+          r = 20;
+        }
+        break;
+
+      case 14000:
+        if (n % 350 == 0) {
+          r = 350;
+        } else if ((n % 40) == 0) {
+          r = 40;
+        }
+        break;
+
+      default:
+        if (_n <= 40) {
+          r = _n;
+        }
+        break;
     }
+
+    // if ((n % 6000) == 0) {
+    //   r = 6000;
+    // } else if ((n % 2048) == 0) {
+    //   r = 2048;
+    // } else if ((n % 700) == 0) {
+    //   r = 700;
+    // } else {
+    //   // prime
+    //   r = n;
+    // }
+
+    // if (_n == 7000) {
+    //   if (n % 200 == 0) {
+    //     r = 200;
+    //   } else if ((n % 35) == 0) {
+    //     r = 35;
+    //   }
+    // }
+
+    // if (_n == 14000) {
+    //   if (n % 350 == 0) {
+    //     r = 350;
+    //   } else if ((n % 40) == 0) {
+    //     r = 40;
+    //   } else if ((n % 10) == 0) {
+    //     r = 10;
+    //   } else if ((n % 8) == 0) {
+    //     r = 8;
+    //   } else {
+    //     // prime
+    //     r = n;
+    //   }
+    // }
 
     // printf("radix%d = %d\n", stage_num+1, r);
     n /= r;
@@ -609,6 +896,78 @@ mluOpAllocateC2C1D(mluOpHandle_t handle, mluOpFFTPlan_t fft_plan,
   return MLUOP_STATUS_SUCCESS;
 }
 
+mluOpStatus_t MLUOP_WIN_API mluOpAllocateC2C2D(
+    mluOpHandle_t handle, mluOpFFTPlan_t fft_plan,
+    mluOpTensorDescriptor_t input_desc, mluOpTensorDescriptor_t output_desc,
+    const int _n0, const int _n1) {
+  const std::string make_plan_api = "[mluOpAllocateC2C2D]";
+  size_t workspace_size = 0;
+  size_t reservespace_size = 0;
+
+  size_t CPX_TYPE_SIZE = 0;
+
+  switch (fft_plan->fft_type) {
+    case CNFFT_COMPLEX_HALF2COMPLEX_HALF: {
+      CPX_TYPE_SIZE = 2 * 2;
+    } break;
+    case CNFFT_COMPLEX_FLOAT2COMPLEX_FLOAT: {
+      CPX_TYPE_SIZE = 4 * 2;
+    }; break;
+    default: {
+      LOG(ERROR) << make_plan_api << ": invalid c2c 2d fft type.";
+      return MLUOP_STATUS_BAD_PARAM;
+    }
+  }
+
+  // int batch = fft_plan->batch;
+  int batch = 1;
+
+  size_t buffer_size = batch * sizeof(CPX_TYPE_SIZE) * _n0 * _n1;
+
+  workspace_size = buffer_size * 3;
+
+  // int padded_input_num = batch * n;
+  const int trans_dim_num = 3;
+  int trans_input_dims[trans_dim_num] = {fft_plan->n[0], fft_plan->n[1],
+                                         COMPLEX};
+  int trans_output_dims[trans_dim_num] = {fft_plan->n[1], fft_plan->n[0],
+                                          COMPLEX};
+  int trans_permute[trans_dim_num] = {1, 0, 2};
+  size_t trans_workspace_size;
+  mluOpStatus_t status = fftGetTransposeWorkspaceSize(
+      handle, trans_workspace_size, trans_dim_num, trans_input_dims,
+      trans_permute, fft_plan->input_dtype, make_plan_api);
+
+  workspace_size = (workspace_size > trans_workspace_size)
+                       ? workspace_size
+                       : trans_workspace_size;
+
+  status = fftGetTransposeWorkspaceSize(
+      handle, trans_workspace_size, trans_dim_num, trans_output_dims,
+      trans_permute, fft_plan->input_dtype, make_plan_api);
+
+  // CALL_CNNL(cnnlTranspose_v2(cnnl_handle, trans_desc, cnnl_input_desc,
+  // ori_ptr,
+  //                            cnnl_transed_input_desc, transed_ptr, workspace,
+  //                            workspace_size));
+
+  workspace_size = (workspace_size > trans_workspace_size)
+                       ? workspace_size
+                       : trans_workspace_size;
+
+  size_t twiddles_size = sizeof(CPX_TYPE_SIZE) * _n0 * 2;
+  size_t twiddles_size_2d = sizeof(CPX_TYPE_SIZE) * _n1 * 2;
+  reservespace_size = sizeof(int) * (FFT_MAXFACTORS) /* factors */
+                      + sizeof(int) * (FFT_MAXFACTORS) + twiddles_size +
+                      DFT_TABLE_SIZE + twiddles_size_2d +
+                      DFT_TABLE_SIZE; /* twiddles */
+
+  fft_plan->workspace_size = workspace_size;
+  fft_plan->reservespace_size = reservespace_size;
+
+  return status;
+}
+
 /**
  * @degroup C2C_PLAN Floating Complex-to-Complex FFT plan
  */
@@ -635,8 +994,8 @@ mluOpStatus_t MLUOP_WIN_API mluOpMakeFFTPlanC2C1D(
     case CNFFT_FLOAT2COMPLEX_FLOAT:
     case CNFFT_COMPLEX_FLOAT2FLOAT:
     case CNFFT_COMPLEX_FLOAT2COMPLEX_FLOAT:
-      fftGenerateTwiddles<float>(fft_plan->twiddles, fft_plan->factors, n[0],
-                                 direction);
+      fftGenerateTwiddles<float>(fft_plan->twiddles, fft_plan->twiddles_end,
+                                 fft_plan->factors, n[0], direction);
       fftGenerateDftMatrix<float>(fft_plan->dft_matrix, fft_plan->factors, n[0],
                                   direction);
       break;
@@ -649,10 +1008,84 @@ mluOpStatus_t MLUOP_WIN_API mluOpMakeFFTPlanC2C1D(
       //                           direction);
 
       // TODO(zrg): need to copy twiddles to device, and convert to half.
-      fftGenerateTwiddles<float>(fft_plan->twiddles, fft_plan->factors, n[0],
-                                 direction);
+      fftGenerateTwiddles<float>(fft_plan->twiddles, fft_plan->twiddles_end,
+                                 fft_plan->factors, n[0], direction);
       fftGenerateDftMatrix<float>(fft_plan->dft_matrix, fft_plan->factors, n[0],
                                   direction);
+      break;
+    default:
+      break;
+  }
+
+  // if(fft_plan->twiddles == NULL){
+  //   std::cout<<" \n\n\n fft_plan->twiddles == NULL \n\n\n"<<std::endl;
+  // }
+  // CNAME(openfft_generate_twiddles)(st->twiddles, st->factors, nfft, st->dir);
+
+  return MLUOP_STATUS_SUCCESS;
+}
+
+/**
+ * @degroup C2C_PLAN Floating Complex-to-Complex FFT plan
+ */
+
+mluOpStatus_t MLUOP_WIN_API mluOpMakeFFTPlanC2C2D(
+    mluOpHandle_t handle, mluOpFFTPlan_t fft_plan,
+    mluOpTensorDescriptor_t input_desc, mluOpTensorDescriptor_t output_desc,
+    const int rank, const int *n, const int direction) {
+  // reservespace_addr_ = mlu_runtime_.allocate(reservespace_size_)
+  // st = CNAME(openfft_allocate_c2c_plan_1d)(nfft, fin, fout, dir);
+
+  // std::cout<< "mluOpAllocateC2C1D"<<std::endl;
+  mluOpAllocateC2C2D(handle, fft_plan, input_desc, output_desc, n[0], n[1]);
+  // std::cout<< "mluOpAllocateC2C1D"<<std::endl;
+  fftTwoStepFactor(n[1], fft_plan->factors);
+  fftTwoStepFactor(n[0], fft_plan->factors_2d);
+  // result = openfft_factor(nfft, st->factors);
+  // if (result == OPENFFT_ERR)
+  // {
+  //     openfft_aligned_free(st);
+  //     return NULL;
+  // }
+
+  switch (fft_plan->fft_type) {
+    case CNFFT_FLOAT2COMPLEX_FLOAT:
+    case CNFFT_COMPLEX_FLOAT2FLOAT:
+    case CNFFT_COMPLEX_FLOAT2COMPLEX_FLOAT:
+      fftGenerateTwiddles<float>(fft_plan->twiddles, fft_plan->twiddles_end,
+                                 fft_plan->factors, n[1], direction);
+      fftGenerateDftMatrix<float>(fft_plan->dft_matrix, fft_plan->factors, n[1],
+                                  direction);
+      fftGenerateTwiddlesColumn<float>(fft_plan->twiddles_2d,
+                                       fft_plan->twiddles_2d_end,
+                                       fft_plan->factors_2d, n[0], direction);
+      fftGenerateDftMatrix<float>(fft_plan->dft_matrix_2d, fft_plan->factors_2d,
+                                  n[0], direction);
+      break;
+    case CNFFT_HALF2COMPLEX_HALF:
+    case CNFFT_COMPLEX_HALF2HALF:
+    case CNFFT_COMPLEX_HALF2COMPLEX_HALF:
+      // fftGenerateTwiddles<half>(fft_plan->twiddles,
+      //                           fft_plan->factors,
+      //                           n[0],
+      //                           direction);
+
+      // TODO(zrg): need to copy twiddles to device, and convert to half.
+      // fftGenerateTwiddles<float>(fft_plan->twiddles_2d, fft_plan->factors_2d,
+      // n[1],
+      //                            direction);
+      // fftGenerateDftMatrix<float>(fft_plan->dft_matrix_2d,
+      // fft_plan->factors_2d, n[1],
+      //                             direction);
+      fftGenerateTwiddles<float>(fft_plan->twiddles, fft_plan->twiddles_end,
+                                 fft_plan->factors, n[1], direction);
+      fftGenerateDftMatrix<float>(fft_plan->dft_matrix, fft_plan->factors, n[1],
+                                  direction);
+      fftGenerateTwiddlesColumn<float>(fft_plan->twiddles_2d,
+                                       fft_plan->twiddles_2d_end,
+                                       fft_plan->factors_2d, n[0], direction);
+      fftGenerateDftMatrix<float>(fft_plan->dft_matrix_2d, fft_plan->factors_2d,
+                                  n[0], direction);
       break;
     default:
       break;
@@ -737,6 +1170,10 @@ mluOpStatus_t MLUOP_WIN_API mluOpMakeFFTPlanMany(
                    ": batch size mismatch.");
   }
 
+  if (rank == 2) {
+    fft_plan->batch_2d = input_desc->dims[2];
+    fft_plan->batch = input_desc->dims[1];
+  }
   // The FFT Struct is designed after cufftXtMakePlanMany.
   // An element of coordinates [z, y, x] in signal number b in the batch will
   // be associated with the following addresses in the memory
@@ -907,10 +1344,9 @@ mluOpStatus_t MLUOP_WIN_API mluOpMakeFFTPlanMany(
   }
 
   // unsupported param
-  if (fft_plan->rank != 1) {
-    LOG(ERROR)
-        << make_plan_api
-        << ": 2-dimensional and 3-dimensional FFT are not supported currently.";
+  if (fft_plan->rank != 1 && fft_plan->rank != 2) {
+    LOG(ERROR) << make_plan_api
+               << ": 3-dimensional FFT are not supported currently.";
     return MLUOP_STATUS_NOT_SUPPORTED;
   }
 
@@ -977,6 +1413,12 @@ mluOpStatus_t MLUOP_WIN_API mluOpMakeFFTPlanMany(
         // C2C 1D
         status = mluOpMakeFFTPlanC2C1D(handle, fft_plan, input_desc,
                                        output_desc, rank, n, direction);
+      } else if (rank == 2) {
+        VLOG(5) << "into make FFT2d Policy";
+        // status = makeFFT1dPolicy(handle, fft_plan);
+        // C2C 1D
+        status = mluOpMakeFFTPlanC2C2D(handle, fft_plan, input_desc,
+                                       output_desc, rank, n, direction);
       }
     }; break;
   }
@@ -1011,6 +1453,14 @@ mluOpStatus_t MLUOP_WIN_API mluOpDestroyFFTPlan(mluOpFFTPlan_t fft_plan) {
     delete (char *)fft_plan->twiddles;
   }
 
+  if (fft_plan->factors_2d != NULL) {
+    delete fft_plan->factors_2d;
+  }
+
+  if (fft_plan->twiddles_2d != NULL) {
+    delete (char *)fft_plan->twiddles_2d;
+  }
+
   delete fft_plan;
   return MLUOP_STATUS_SUCCESS;
 }
@@ -1041,6 +1491,9 @@ mluOpStatus_t MLUOP_WIN_API mluOpSetFFTReserveArea(mluOpHandle_t handle,
       if (fft_plan->rank == 1) {
         // status = setFFT1dReserveArea(handle, fft_plan, api);
         status = setFFT1dReserveArea_v2(handle, fft_plan, api);
+      } else if (fft_plan->rank == 2) {
+        // status = setFFT1dReserveArea(handle, fft_plan, api);
+        status = setFFT2dReserveArea(handle, fft_plan, api);
       } else {
         status = MLUOP_STATUS_NOT_SUPPORTED;
       }
@@ -1145,7 +1598,9 @@ mluOpStatus_t MLUOP_WIN_API mluOpExecFFT(
                            output, direction);
       } else if (fft_plan->rank == 2) {
         // TODO(who)
-        status = MLUOP_STATUS_NOT_SUPPORTED;
+        // status = MLUOP_STATUS_NOT_SUPPORTED;
+        status = execFFT2d(handle, fft_plan, input, scale_factor, workspace,
+                           output, direction);
       } else if (fft_plan->rank == 3) {
         // TODO(who)
         status = MLUOP_STATUS_NOT_SUPPORTED;

@@ -20,25 +20,4 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  *************************************************************************/
-#ifndef KERNELS_FFT_COMMON_FFT_COMMON_KERNELS_H_
-#define KERNELS_FFT_COMMON_FFT_COMMON_KERNELS_H_
-
-#include "kernels/fft/fft.h"
-
-mluOpStatus_t MLUOP_WIN_API kernelGenerateRFFTHalfDFTMatrix(
-    cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue,
-    mluOpFFTPlan_t fft_plan, mluOpDataType_t in_r_dtype, int n);
-
-mluOpStatus_t MLUOP_WIN_API kernelGenerateRFFTFullDFTMatrix(
-    cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue,
-    mluOpFFTPlan_t fft_plan, mluOpDataType_t in_r_dtype, int row, int n);
-
-mluOpStatus_t MLUOP_WIN_API kernelGenerateIRFFTHalfDFTMatrix(
-    cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue,
-    mluOpFFTPlan_t fft_plan, mluOpDataType_t in_r_dtype, int n);
-
-mluOpStatus_t MLUOP_WIN_API kernelGenerateIRFFTFullDFTMatrix(
-    cnrtDim3_t k_dim, cnrtFunctionType_t k_type, cnrtQueue_t queue,
-    mluOpFFTPlan_t fft_plan, mluOpDataType_t in_r_dtype, int n);
-
-#endif  // KERNELS_FFT_COMMON_FFT_COMMON_KERNELS_H_
+#pragma once

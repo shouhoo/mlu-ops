@@ -30,6 +30,7 @@ void FftExecutor::paramCheck() {
 }
 
 void FftExecutor::workspaceMalloc() {
+  // return;
   auto input_tensor = tensor_desc_[0].tensor;
   auto output_tensor = tensor_desc_[1].tensor;
 
@@ -64,6 +65,7 @@ void FftExecutor::workspaceMalloc() {
 }
 
 void FftExecutor::compute() {
+  // return;
   VLOG(4) << "FftExecutor compute ";
   auto input_dev = data_vector_[0].device_ptr;
   auto output_dev = data_vector_[1].device_ptr;
@@ -91,23 +93,79 @@ void FftExecutor::workspaceFree() {
 
 void FftExecutor::cpuCompute() {
   // TODO(sunhui): use fftw? librosa? OTFFT? other thrid-party library.
+  // auto batch = parser_->getInputDataCount(0);
   auto count = parser_->getInputDataCount(0);
+  // printf("\n\n\nbatch: %ld, count: %ld\n\n\n", batch, count);
+  // cpu_fp32_output_[0][i] = (cpu_fp32_input_[0][i]);
+
   for (int i = 0; i < count; ++i) {
     cpu_fp32_output_[0][i] = (cpu_fp32_input_[0][i]);
   }
 
-  auto size = count;
+#define TEST_C2C1D_FP32 0
+#define TEST_C2C2D_FP32 1
+
+#if TEST_C2C1D_FP32
+  auto size = count / 32;
   fftwf_plan fft;
 
   fftwf_complex* fftw_out = ((fftwf_complex*)cpu_fp32_output_[0]);
   fftwf_complex* fftw_in = ((fftwf_complex*)cpu_fp32_input_[0]);
 
-  fft = fftwf_plan_dft_1d(size, fftw_in, fftw_out, FFTW_FORWARD,
+  // int rank = 1;
+  // int rank = fft_param.rank();
+  int howmany = 32;
+  // fft = fftwf_plan_many_dft(rank, &size, howmany, fftw_in, inembed, istride,
+  // idist,
+  //                           fftw_out, onembed, ostride, odist,
+  //                           FFTW_FORWARD, FFTW_MEASURE);
+
+  // fft = fftwf_plan_dft_1d(size, fftw_in, fftw_out, FFTW_FORWARD,
+  //                         FFTW_ESTIMATE);  // Setup fftw plan for fft
+
+  // fftwf_execute(fft);
+
+  for (int batch_id = 0; batch_id < 32; batch_id++) {
+    fft = fftwf_plan_dft_1d(size, fftw_in + batch_id * size,
+                            fftw_out + batch_id * size, FFTW_FORWARD,
+                            FFTW_ESTIMATE);  // Setup fftw plan for fft
+
+    fftwf_execute(fft);
+  }
+  fftwf_destroy_plan(fft);
+#endif
+
+#if TEST_C2C2D_FP32
+  fftwf_plan fft;
+
+  fftwf_complex* fftw_out = ((fftwf_complex*)cpu_fp32_output_[0]);
+  fftwf_complex* fftw_in = ((fftwf_complex*)cpu_fp32_input_[0]);
+
+  // int rank = 1;
+  // int rank = fft_param.rank();
+  // int howmany = 32;
+  // fft = fftwf_plan_many_dft(rank, &size, howmany, fftw_in, inembed, istride,
+  // idist,
+  //                           fftw_out, onembed, ostride, odist,
+  //                           FFTW_FORWARD, FFTW_MEASURE);
+
+  // fft = fftwf_plan_dft_1d(size, fftw_in, fftw_out, FFTW_FORWARD,
+  //                         FFTW_ESTIMATE);  // Setup fftw plan for fft
+
+  // fftwf_execute(fft);
+  // printf("count: %ld\n", count);
+  // [batch, n0, n1]
+  int n[2];
+  n[0] = parser_->getProtoNode()->fft_param().n()[0];
+  n[1] = parser_->getProtoNode()->fft_param().n()[1];
+
+  fft = fftwf_plan_dft_2d(n[0], n[1], fftw_in, fftw_out, FFTW_FORWARD,
                           FFTW_ESTIMATE);  // Setup fftw plan for fft
 
   fftwf_execute(fft);
-
   fftwf_destroy_plan(fft);
+
+#endif
 }
 
 int64_t FftExecutor::getTheoryOps() {
